@@ -54,10 +54,12 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_counts: [0; 512], // 新增初始化
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
+            //task.syscall_counts = [0; 512]; // 显式初始化
         }
         TaskManager {
             num_app,
@@ -74,6 +76,28 @@ lazy_static! {
 impl TaskManager {
     /// Run the first task in task list.
     ///
+
+    pub fn record_syscall(&self, task_id: usize, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        if syscall_id < inner.tasks[task_id].syscall_counts.len() {
+            inner.tasks[task_id].syscall_counts[syscall_id] += 1;
+        }
+    }
+
+    /// Get the count of a specific syscall for current task
+    ///
+    /// # Arguments
+    /// * `syscall_id` - The ID of the syscall to query
+    ///
+    /// # Returns
+    /// - The number of times the syscall has been invoked
+    /// - Returns 0 if syscall_id is out of bounds
+    pub fn get_syscall_count(&self, syscall_id: usize) -> isize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_counts.get(syscall_id).copied().unwrap_or(0) as isize
+    }
+
     /// Generally, the first task in task list is an idle task (we call it zero process later).
     /// But in ch3, we load apps statically, so the first task is a real app.
     fn run_first_task(&self) -> ! {
@@ -168,4 +192,13 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+// os/src/task/mod.rs
+/// Get current running task ID
+///
+/// # Returns
+/// - Current task ID (0-based index)
+pub fn current_task() -> usize {
+    TASK_MANAGER.inner.exclusive_access().current_task
 }
