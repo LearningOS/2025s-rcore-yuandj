@@ -31,10 +31,12 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
     let us = get_time_us();
     unsafe {
-        *ts = TimeVal {
-            sec: us / 1_000_000,
-            usec: us % 1_000_000,
-        };
+        //*ts = TimeVal {
+        //    sec: us / 1_000_000,
+        //    usec: us % 1_000_000,
+        //};
+        (*ts).sec = us / 1_000_000;
+        (*ts).usec = us % 1_000_000;
     }
     0
 }
