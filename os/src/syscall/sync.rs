@@ -1,3 +1,5 @@
+// src/syscall/sync.rs
+use crate::syscall::SyscallError; // 添加这行到文件顶部
 use crate::sync::{Condvar, Mutex, MutexBlocking, MutexSpin, Semaphore};
 use crate::task::{block_current_and_run_next, current_process, current_task};
 use crate::timer::{add_timer, get_time_ms};
@@ -68,8 +70,32 @@ pub fn sys_mutex_lock(mutex_id: usize) -> isize {
             .unwrap()
             .tid
     );
+
     let process = current_process();
     let process_inner = process.inner_exclusive_access();
+
+    // 死锁检测逻辑
+    if process_inner.deadlock_detect_enabled {
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+        
+        // 假设每个mutex是独立资源类
+        let available = process_inner.mutex_available[0];
+        let mut fake_allocation = process_inner.mutex_allocation.clone();
+        let mut fake_need = process_inner.mutex_need.clone();
+        
+        // 模拟分配
+        fake_allocation.insert(tid, fake_allocation.get(&tid).unwrap_or(&0) + 1);
+        fake_need.insert(tid, fake_need.get(&tid).unwrap_or(&1) - 1);
+        
+        if !crate::sync::deadlock::is_safe(
+            available - 1, // 扣除当前请求
+            &fake_allocation,
+            &fake_need
+        ) {
+            return -0xDEAD; // 返回死锁错误码
+        }
+    }
+
     let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
     drop(process_inner);
     drop(process);
@@ -164,6 +190,26 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
     );
     let process = current_process();
     let process_inner = process.inner_exclusive_access();
+
+    if process_inner.deadlock_detect_enabled {
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+        let available = process_inner.semaphore_available[0];
+        let mut fake_allocation = process_inner.semaphore_allocation.clone();
+        let mut fake_need = process_inner.semaphore_need.clone();
+        
+        // 模拟分配
+        fake_allocation.insert(tid, fake_allocation.get(&tid).unwrap_or(&0) + 1);
+        fake_need.insert(tid, fake_need.get(&tid).unwrap_or(&1) - 1);
+        
+        if !crate::sync::deadlock::is_safe(
+            available - 1,
+            &fake_allocation,
+            &fake_need
+        ) {
+            return -0xDEAD;
+        }
+    }
+
     let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
     drop(process_inner);
     sem.down();
@@ -245,7 +291,22 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
 /// enable deadlock detection syscall
 ///
 /// YOUR JOB: Implement deadlock detection, but might not all in this syscall
-pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
-    trace!("kernel: sys_enable_deadlock_detect NOT IMPLEMENTED");
-    -1
+//pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
+//    trace!("kernel: sys_enable_deadlock_detect NOT IMPLEMENTED");
+//    -1
+pub fn sys_enable_deadlock_detect(enabled: usize) -> isize {
+    let process = current_process();
+    let mut process_inner = process.inner_exclusive_access();
+    //process_inner.deadlock_detect_enabled = enabled != 0;
+    //0
+    
+    // 参数检查
+    if enabled != 0 && enabled != 1 {
+        //return -1; // 参数不合法
+        return SyscallError::EINVAL as isize;
+    }
+    
+    process_inner.deadlock_detect_enabled = enabled != 0;
+    0 // 成功返回0
 }
+

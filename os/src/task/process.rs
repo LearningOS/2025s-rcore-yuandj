@@ -2,6 +2,7 @@
 
 use super::id::RecycleAllocator;
 use super::manager::insert_into_pid2process;
+use alloc::collections::BTreeMap;
 use super::TaskControlBlock;
 use super::{add_task, SignalFlags};
 use super::{pid_alloc, PidHandle};
@@ -10,6 +11,7 @@ use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
 use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::string::String;
+//use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -37,6 +39,14 @@ pub struct ProcessControlBlockInner {
     pub exit_code: i32,
     /// file descriptor table
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+
+    // Deadlock detection
+    pub deadlock_detect_enabled: bool,   // 是否启用死锁检测
+    // For mutex
+    pub mutex_available: Vec<usize>,   // 可用互斥量数
+    pub mutex_allocation: BTreeMap<usize, usize>, // tid -> count // 线程ID -> 已分配数
+    pub mutex_need: BTreeMap<usize, usize>,       // tid -> count      // 线程ID -> 需求数
+
     /// signal flags
     pub signals: SignalFlags,
     /// tasks(also known as threads)
@@ -49,6 +59,14 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+
+    // ... 原有字段 ...
+    // For semaphore
+    pub semaphore_available: Vec<usize>,     // 信号量可用数 
+    pub semaphore_allocation: BTreeMap<usize, usize>,
+    pub semaphore_need: BTreeMap<usize, usize>,
+
+
 }
 
 impl ProcessControlBlockInner {
@@ -92,10 +110,11 @@ impl ProcessControlBlock {
     /// new process from elf file
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
         trace!("kernel: ProcessControlBlock::new");
-        // memory_set with elf program headers/trampoline/trap context/user stack
+        // 内存设置（保持不变）
         let (memory_set, ustack_base, entry_point) = MemorySet::from_elf(elf_data);
-        // allocate a pid
         let pid_handle = pid_alloc();
+        
+        // 正确的结构体初始化（修复重复字段和缺失字段）
         let process = Arc::new(Self {
             pid: pid_handle,
             inner: unsafe {
@@ -106,13 +125,17 @@ impl ProcessControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: vec![
-                        // 0 -> stdin
                         Some(Arc::new(Stdin)),
-                        // 1 -> stdout
                         Some(Arc::new(Stdout)),
-                        // 2 -> stderr
                         Some(Arc::new(Stdout)),
                     ],
+                    deadlock_detect_enabled: false,
+                    mutex_available: vec![1],
+                    mutex_allocation: BTreeMap::new(),
+                    mutex_need: BTreeMap::new(),
+                    semaphore_available: vec![5],
+                    semaphore_allocation: BTreeMap::new(),
+                    semaphore_need: BTreeMap::new(),
                     signals: SignalFlags::empty(),
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
@@ -120,7 +143,7 @@ impl ProcessControlBlock {
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
                 })
-            },
+            }
         });
         // create a main thread, we should allocate ustack and trap_cx here
         let task = Arc::new(TaskControlBlock::new(
@@ -211,24 +234,21 @@ impl ProcessControlBlock {
     }
 
     /// Only support processes with a single thread.
-    pub fn fork(self: &Arc<Self>) -> Arc<Self> {
+     /// fork函数修正
+     pub fn fork(self: &Arc<Self>) -> Arc<Self> {
         trace!("kernel: fork");
-        let mut parent = self.inner_exclusive_access();
+        let mut parent = self.inner_exclusive_access(); // 获取父进程的引用
         assert_eq!(parent.thread_count(), 1);
-        // clone parent's memory_set completely including trampoline/ustacks/trap_cxs
+
+        // 克隆内存设置和文件描述符表（保持不变）
         let memory_set = MemorySet::from_existed_user(&parent.memory_set);
-        // alloc a pid
         let pid = pid_alloc();
-        // copy fd table
-        let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
+        let mut new_fd_table = Vec::new();
         for fd in parent.fd_table.iter() {
-            if let Some(file) = fd {
-                new_fd_table.push(Some(file.clone()));
-            } else {
-                new_fd_table.push(None);
-            }
+            new_fd_table.push(fd.clone());
         }
-        // create child process pcb
+
+        // 正确继承父进程字段（修复E0063错误）
         let child = Arc::new(Self {
             pid,
             inner: unsafe {
@@ -239,6 +259,13 @@ impl ProcessControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: new_fd_table,
+                    deadlock_detect_enabled: parent.deadlock_detect_enabled,
+                    mutex_available: parent.mutex_available.clone(),
+                    mutex_allocation: parent.mutex_allocation.clone(),
+                    mutex_need: parent.mutex_need.clone(),
+                    semaphore_available: parent.semaphore_available.clone(),
+                    semaphore_allocation: parent.semaphore_allocation.clone(),
+                    semaphore_need: parent.semaphore_need.clone(),
                     signals: SignalFlags::empty(),
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),

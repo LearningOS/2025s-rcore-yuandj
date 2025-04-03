@@ -9,6 +9,9 @@
 //! For clarity, each single syscall is implemented as its own function, named
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
+// src/syscall/mod.rs
+mod error;
+pub use error::SyscallError;  // 新增导出
 
 /// openat syscall
 pub const SYSCALL_OPENAT: usize = 56;
